@@ -6,21 +6,27 @@ import "./styles/App.css";
 
 export default function App() {
   const [code, setCode] = useState(
-    "def greet(name):\n    print('Hello, ' + name)\n\ngreet('World')\n"
+    "def greet(name):\n    print('Hello, ' + name)\n\ngreet('World')\n",
   );
   const [cpp, setCpp] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [errors, setErrors] = useState([]);
 
   async function runTranslate() {
     setLoading(true);
     setErr("");
+    setErrors([]); // очищаем старые ошибки
     setCpp("");
     try {
       const out = await translate(code);
       setCpp(out);
     } catch (e) {
-      setErr(String(e?.message || e));
+      if (e.errors) {
+        setErrors(e.errors);
+      } else {
+        setErr(String(e?.message || e));
+      }
     } finally {
       setLoading(false);
     }
@@ -46,7 +52,10 @@ export default function App() {
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-body" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div
+          className="card-body"
+          style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+        >
           <button className="btn" disabled={loading} onClick={runTranslate}>
             {loading ? "Перевожу…" : "Перевести (Ctrl+Enter)"}
           </button>
@@ -57,6 +66,23 @@ export default function App() {
       </div>
 
       {err && <div className="alert">Ошибка: {err}</div>}
+
+      {errors.length > 0 && (
+        <div className="alert error-list">
+          <strong>Ошибки трансляции:</strong>
+          <ul>
+            {errors.map((err, i) => (
+              <li key={i}>
+                <strong>{err.type.toUpperCase()}</strong>
+                {err.line !== null &&
+                  err.line !== undefined &&
+                  ` (строка ${err.line})`}
+                : {err.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <CodeEditors code={code} setCode={setCode} cpp={cpp} />
     </div>

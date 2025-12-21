@@ -32,7 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Only files matching these patterns are included: C:\Users\Mvide\Downloads\translator-app1\backend\trans\ast_nodes.py, C:\Users\Mvide\Downloads\translator-app1\backend\trans\code_generator.py, C:\Users\Mvide\Downloads\translator-app1\backend\trans\lexer.py, C:\Users\Mvide\Downloads\translator-app1\backend\trans\main.py, C:\Users\Mvide\Downloads\translator-app1\backend\trans\semantic_analyzer.py, C:\Users\Mvide\Downloads\translator-app1\backend\trans\simple_parser.py
+- Only files matching these patterns are included: /home/mik3/Desktop/translator-app/backend/trans/ast_nodes.py, /home/mik3/Desktop/translator-app/backend/trans/code_generator.py, /home/mik3/Desktop/translator-app/backend/trans/lexer.py, /home/mik3/Desktop/translator-app/backend/trans/semantic_analyzer.py, /home/mik3/Desktop/translator-app/backend/trans/simple_parser.py, /home/mik3/Desktop/translator-app/backend/api/app.py
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -41,10 +41,2166 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
-
+/
+  home/
+    mik3/
+      Desktop/
+        translator-app/
+          backend/
+            api/
+              app.py
+            trans/
+              ast_nodes.py
+              code_generator.py
+              lexer.py
+              semantic_analyzer.py
+              simple_parser.py
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="/home/mik3/Desktop/translator-app/backend/api/app.py">
+import sys
+import traceback
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
+
+# наши модули
+from trans.simple_parser import IndentBlockParser
+from trans.code_generator import CppCodeGenerator
+from trans.semantic_analyzer import SemanticError, SemanticAnalyzer
+from trans.lexer import LexicalError
+
+# увеличиваем лимит рекурсии (временно)
+sys.setrecursionlimit(5000)
+
+# создаём приложение
+app = FastAPI(title="Translator API", version="1.0.0")
+
+# ✅ CORS – чтобы фронтенд мог отправлять OPTIONS/POST без 405
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=False,  # важно – иначе нужно указывать точный origin
+    allow_methods=["*"],  # разрешаем POST, GET, OPTIONS
+    allow_headers=["*"],
+)
+
+
+# ✅ ручной ответ на OPTIONS (некоторые браузеры требуют)
+@app.options("/translate")
+def options_translate():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
+
+# модели данных
+class TranslateIn(BaseModel):
+    code: str
+
+
+class ErrorDetail(BaseModel):
+    type: str  # "lexical", "syntax", "semantic", "runtime" и т.д.
+    message: str
+    line: Optional[int] = None  # номер строки, если известен
+
+
+class TranslateOut(BaseModel):
+    success: bool
+    cpp: Optional[str] = None
+    errors: Optional[List[ErrorDetail]] = None
+
+
+@app.post("/translate", response_model=TranslateOut)
+def translate(payload: TranslateIn):
+    code = payload.code or ""
+    errors = []
+
+    try:
+        parser = IndentBlockParser()
+        program = parser.parse(code)
+
+        # Semantic analysis - must pass before code generation
+        analyzer = SemanticAnalyzer()
+        analyzer.analyze(program)  # will raise SemanticError if errors found
+
+        # Only generate code if semantic analysis passed
+        generator = CppCodeGenerator()
+        cpp = generator.generate(program)
+
+        return TranslateOut(success=True, cpp=cpp, errors=None)
+
+    except LexicalError as le:
+        line_num = getattr(le, "lineno", None)
+        errors.append(
+            ErrorDetail(
+                type="lexical", message=getattr(le, "message", str(le)), line=line_num
+            )
+        )
+    except SyntaxError as e:
+        line_num = getattr(e, "lineno", None)
+        if line_num is not None:
+            try:
+                line_num = int(line_num)
+            except (ValueError, TypeError):
+                line_num = None
+        errors.append(ErrorDetail(type="syntax", message=str(e), line=line_num))
+    except SemanticError as se:
+        errors.extend(
+            [
+                ErrorDetail(type="semantic", message=msg)
+                for msg in str(se).split("\n")
+                if msg.strip()
+            ]
+        )
+    except RecursionError:
+        errors.append(
+            ErrorDetail(
+                type="runtime",
+                message="Слишком глубокая рекурсия (возможно, левая рекурсия или бесконечный цикл)",
+            )
+        )
+    except Exception as e:
+        traceback.print_exc()
+        errors.append(ErrorDetail(type="general", message=str(e)))
+
+    return TranslateOut(success=False, cpp=None, errors=errors)
+
+
+# health-check
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+</file>
+
+<file path="/home/mik3/Desktop/translator-app/backend/trans/ast_nodes.py">
+from abc import ABC, abstractmethod
+from typing import List, Optional, Any
+
+
+class Node(ABC):
+    @abstractmethod
+    def accept(self, visitor) -> Any:
+        pass
+
+
+class Expression(Node):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inferred_type: Optional[str] = None  # "int", "float", "str", "bool"
+
+
+class Statement(Node):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inferred_type: Optional[str] = None
+
+
+class Program(Node):
+    def __init__(self):
+        self.body: List[Statement] = []
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_program(self)
+
+
+class Assignment(Statement):
+    def __init__(self, target: str, value: Expression):
+        self.target = target
+        self.value = value
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_assignment(self)
+
+
+class BinaryOp(Expression):
+    def __init__(self, left: Expression, op: str, right: Expression):
+        self.left = left
+        self.op = op
+        self.right = right
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_binary_op(self)
+
+
+class Literal(Expression):
+    def __init__(self, value: Any):
+        super().__init__()
+        self.value = value
+        if isinstance(value, bool):
+            self.inferred_type = "bool"
+        elif isinstance(value, int):
+            self.inferred_type = "int"
+        elif isinstance(value, float):
+            self.inferred_type = "float"
+        elif isinstance(value, str):
+            self.inferred_type = "str"
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_literal(self)
+
+
+class Variable(Expression):
+    def __init__(self, name: str):
+        self.name = name
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_variable(self)
+
+
+class Call(Expression):
+    def __init__(self, func: Expression, args: List[Expression]):
+        self.func = func
+        self.args = args
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_call(self)
+
+
+class Comment(Statement):
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_comment(self)
+
+
+class AugmentedAssignment(Statement):
+    def __init__(self, target: str, op: str, value: Expression):
+        super().__init__()
+        self.target = target
+        self.op = op
+        self.value = value
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_augmented_assignment(self)
+
+
+class If(Statement):
+    def __init__(
+        self,
+        test: Expression,
+        body: List[Statement],
+        elifs: Optional[List["If"]] = None,
+        orelse: Optional[List[Statement]] = None,
+    ):
+        self.test = test
+        self.body = body
+        self.elifs = elifs or []
+        self.orelse = orelse or []
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_if(self)
+
+
+class Function(Statement):
+    def __init__(self, name: str, params: List[str], body: List[Statement]):
+        self.name = name
+        self.params = params
+        self.body = body
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_function(self)
+
+
+class Return(Statement):
+    def __init__(self, value: Optional[Expression] = None):
+        self.value = value
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_return(self)
+
+
+class While(Statement):
+    def __init__(self, test: Expression, body: List[Statement]):
+        self.test = test
+        self.body = body
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_while(self)
+
+
+class For(Statement):
+    def __init__(
+        self, target: str, start: str, stop: str, body: List[Statement], is_range: bool
+    ):
+        super().__init__()
+        self.target = target
+        self.start = start
+        self.stop = stop
+        self.body = body
+        self.is_range = is_range
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_for(self)
+
+
+class ExprStatement(Statement):
+    def __init__(self, expr):
+        self.expr = expr
+
+    def accept(self, visitor):
+        return visitor.visit_expr_statement(self)
+
+
+class UnaryOp(Expression):
+    def __init__(self, op: str, operand: Expression):
+        super().__init__()
+        self.op = op
+        self.operand = operand
+
+    def accept(self, visitor):
+        return visitor.visit_unary_op(self)
+
+
+class ASTVisitor(ABC):
+    @abstractmethod
+    def visit_expr_statement(self, node: ExprStatement) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_program(self, node: Program) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_assignment(self, node: Assignment) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_binary_op(self, node: BinaryOp) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_literal(self, node: Literal) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_unary_op(self, node: UnaryOp) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_variable(self, node: Variable) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_call(self, node: Call) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_if(self, node: If) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_function(self, node: Function) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_return(self, node: Return) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_while(self, node: While) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_for(self, node: For) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_list_literal(self, node: "ListLiteral") -> Any:
+        pass
+
+    @abstractmethod
+    def visit_augmented_assignment(self, node: AugmentedAssignment) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_comment(self, node: Comment) -> Any:
+        pass
+
+
+class ArrayType:
+    """
+    Представление типа массива в семантике: базовый тип + список размеров.
+    dimensions может быть список int (для литералов) или None/выражения, если размер выражён.
+    """
+
+    def __init__(self, base_type, dimensions):
+        # base_type: строка или другой объект типа
+        # dimensions: list[int] или list[ExpressionNode] (или пустой список для неизвестных)
+        self.base_type = base_type
+        self.dimensions = dimensions or []
+
+    def __repr__(self):
+        return f"ArrayType({self.base_type}, {self.dimensions})"
+
+
+class ArrayDeclarationNode(Node):
+    """
+    Узел объявления массива: int a[10]; float b[3][4];
+    """
+
+    def __init__(self, var_type, name, dimensions, lineno=None):
+        # var_type: строка или TypeNode
+        # name: идентификатор
+        # dimensions: list[int] или list[ExpressionNode]
+        super().__init__(lineno=lineno) if hasattr(Node, "__init__") else None
+        self.var_type = var_type
+        self.name = name
+        self.dimensions = dimensions or []
+
+    def __repr__(self):
+        return f"ArrayDeclarationNode({self.var_type}, {self.name}, {self.dimensions})"
+
+
+class ArrayAccessNode(Node):
+    """
+    Узел обращения к элементу массива: a[expr] или b[i][j]
+    """
+
+    def __init__(self, name, indices, lineno=None):
+        # name: идентификатор
+        # indices: list[ExpressionNode]
+        super().__init__(lineno=lineno) if hasattr(Node, "__init__") else None
+        self.name = name
+        self.indices = indices or []
+
+    def __repr__(self):
+        return f"ArrayAccessNode({self.name}, {self.indices})"
+
+
+class ArrayGet(Expression):
+    def __init__(self, name: str, indices: List[Expression]):
+        self.name = name
+        self.indices = indices
+
+    def accept(self, visitor):
+        return visitor.visit_array_get(self)
+
+
+class ArraySet(Statement):
+    """a[i] = value"""
+
+    def __init__(self, name: str, indices: List[Expression], value: Expression):
+        self.name = name
+        self.indices = indices
+        self.value = value
+
+    def accept(self, visitor):
+        return visitor.visit_array_set(self)
+
+
+class ArrayDeclaration(Statement):
+    """a = [0] * 10 or a = [[0]*4 for _ in range(3)]"""
+
+    def __init__(self, name: str, dimensions: List[int]):
+        self.name = name
+        self.dimensions = dimensions
+
+    def accept(self, visitor):
+        return visitor.visit_array_declaration(self)
+
+
+class ListLiteral(Expression):
+    """Represents a list literal like [1, 2, 3]"""
+
+    def __init__(self, elements: List[Expression]):
+        super().__init__()
+        self.elements = elements
+
+    def accept(self, visitor):
+        return visitor.visit_list_literal(self)
+</file>
+
+<file path="/home/mik3/Desktop/translator-app/backend/trans/code_generator.py">
+from trans.ast_nodes import *
+
+
+class CppCodeGenerator(ASTVisitor):
+    def __init__(self):
+        self.indent_level = 0
+        self.output = []
+        self._variables: dict[str, str] = {}
+
+    # --- Вспомогательные методы ---
+    def indent(self):
+        self.indent_level += 1
+
+    def dedent(self):
+        self.indent_level -= 1
+
+    def add_line(self, line):
+        self.output.append("    " * self.indent_level + line)
+
+    # --- Основная генерация ---
+    def generate(self, ast: Program):
+        self.output = []
+        self._variables.clear()
+
+        self.add_line("// Автоматически сгенерированный код из Python")
+        self.add_line("#include <iostream>")
+        self.add_line("#include <string>")
+        self.add_line("#include <vector>")
+        self.add_line("")
+
+        # Functions first
+        for stmt in ast.body:
+            if isinstance(stmt, Function):
+                stmt.accept(self)
+                self.add_line("")
+
+        self.add_line("int main() {")
+        self.indent()
+        for stmt in ast.body:
+            if not isinstance(stmt, Function):
+                stmt.accept(self)
+        self.add_line("return 0;")
+        self.dedent()
+        self.add_line("}")
+        return "\n".join(self.output)
+
+    def _get_cpp_type(self, node) -> str:
+        if hasattr(node, "inferred_type") and node.inferred_type:
+            if node.inferred_type == "int":
+                return "long long"  # safer for large ints
+            elif node.inferred_type == "float":
+                return "double"
+            elif node.inferred_type == "bool":
+                return "bool"
+            elif node.inferred_type == "str":
+                return "std::string"
+        # Fallback inference
+        if isinstance(node, Literal):
+            if isinstance(node.value, bool):
+                return "bool"
+            if isinstance(node.value, float):
+                return "double"
+            if isinstance(node.value, int):
+                return "long long"
+            if isinstance(node.value, str):
+                return "std::string"
+        return "long long"  # default
+
+    # --- Program ---
+    def visit_program(self, node: Program):
+        for stmt in node.body:
+            stmt.accept(self)
+
+    # --- Function ---
+    def visit_function(self, node: Function):
+        has_return = any(isinstance(s, Return) for s in node.body)
+        return_type = "int" if has_return else "void"
+
+        # Определяем тип параметров
+        params_code = []
+        for p in node.params:
+            if "name" in p.lower():  # Параметры типа строка
+                params_code.append(f"const std::string& {p}")
+            else:
+                params_code.append(f"int {p}")
+
+        self.add_line(f"{return_type} {node.name}({', '.join(params_code)}) {{")
+        self.indent()
+        for stmt in node.body:
+            stmt.accept(self)
+        self.dedent()
+        self.add_line("}")
+
+    # --- Assignment ---
+    def visit_assignment(self, node: Assignment):
+        from trans.ast_nodes import ListLiteral
+
+        expr_code = node.value.accept(self)
+        var_name = node.target
+
+        # Special handling for list literals
+        if isinstance(node.value, ListLiteral):
+            # Infer element type from first element
+            if node.value.elements:
+                elem_type = self._get_cpp_type(node.value.elements[0])
+            else:
+                elem_type = "long long"
+
+            cpp_type = f"std::vector<{elem_type}>"
+            if var_name not in self._variables:
+                self._variables[var_name] = cpp_type
+                self.add_line(f"{cpp_type} {var_name} = {expr_code};")
+            else:
+                self.add_line(f"{var_name} = {expr_code};")
+            return
+
+        # Original code for non-list assignments
+        cpp_type = self._get_cpp_type(node.value)
+
+        if var_name not in self._variables:
+            self._variables[var_name] = cpp_type
+            self.add_line(f"{cpp_type} {var_name} = {expr_code};")
+        else:
+            expected = self._variables[var_name]
+            if expected != cpp_type:
+                expr_code = f"static_cast<{expected}>({expr_code})"
+            self.add_line(f"{var_name} = {expr_code};")
+
+    # --- Call (print, функции) ---
+    def visit_call(self, node: Call):
+        if isinstance(node.func, Variable) and node.func.name == "print":
+            if len(node.args) == 0:
+                self.add_line("std::cout << std::endl;")
+                return ""
+
+            arg_codes = []
+            for arg in node.args:
+                if isinstance(arg, BinaryOp) and self._is_string_concat_chain(arg):
+                    # Special: build << chain for this arg
+                    parts = self._collect_string_concat_parts(arg)
+                    arg_code = " << ".join(parts)
+                else:
+                    arg_code = arg.accept(self)
+                arg_codes.append(arg_code)
+
+            # Add spaces between multiple arguments
+            if len(arg_codes) > 1:
+                line = (
+                    "std::cout << " + ' << " " << '.join(arg_codes) + " << std::endl;"
+                )
+            else:
+                line = "std::cout << " + " << ".join(arg_codes) + " << std::endl;"
+
+            self.add_line(line)
+            return ""
+        else:
+            args_code = [arg.accept(self) for arg in node.args]
+            func_code = node.func.accept(self)
+            return f"{func_code}({', '.join(args_code)})"
+
+    # --- Return ---
+    def visit_return(self, node: Return):
+        val = node.value.accept(self) if node.value else ""
+        self.add_line(f"return {val};")
+
+    # --- If ---
+    def visit_if(self, node: If):
+        # Main if
+        self.add_line(f"if ({node.test.accept(self)}) {{")
+        self.indent()
+        for stmt in node.body:
+            stmt.accept(self)
+        self.dedent()
+
+        # Handle chained elifs
+        for elif_node in node.elifs:
+            self.add_line(f"}} else if ({elif_node.test.accept(self)}) {{")
+            self.indent()
+            for stmt in elif_node.body:
+                stmt.accept(self)
+            self.dedent()
+
+        # Handle else
+        if node.orelse:
+            self.add_line("} else {")
+            self.indent()
+            for stmt in node.orelse:
+                stmt.accept(self)
+            self.dedent()
+
+        self.add_line("}")
+
+    # --- While ---
+    def visit_while(self, node: While):
+        self.add_line(f"while ({node.test.accept(self)}) {{")
+        self.indent()
+        for stmt in node.body:
+            stmt.accept(self)
+        self.dedent()
+        self.add_line("}")
+
+    # --- For ---
+    def visit_for(self, node: For):
+        if getattr(node, "is_range", True):
+            self.add_line(
+                f"for (int {node.target} = {node.start}; {node.target} < {node.stop}; ++{node.target}) {{"
+            )
+        else:
+            self.add_line(f"for (auto& {node.target} : {node.stop}) {{")
+
+        self.indent_level += 1
+        for stmt in node.body:
+            stmt.accept(self)
+        self.indent_level -= 1
+        self.add_line("}")
+
+    # --- BinaryOp ---
+    def visit_binary_op(self, node: BinaryOp):
+        left_code = node.left.accept(self)
+        right_code = node.right.accept(self)
+        cpp_op = self._convert_operator(node.op)
+
+        # Only add parentheses when necessary for precedence
+        # Check if children are also binary ops that need parentheses
+        needs_left_parens = isinstance(node.left, BinaryOp) and self._needs_parens(
+            node.left, node, True
+        )
+        needs_right_parens = isinstance(node.right, BinaryOp) and self._needs_parens(
+            node.right, node, False
+        )
+
+        if needs_left_parens:
+            left_code = f"({left_code})"
+        if needs_right_parens:
+            right_code = f"({right_code})"
+
+        return f"{left_code} {cpp_op} {right_code}"
+
+    def _needs_parens(self, child, parent, is_left):
+        """Check if child node needs parentheses based on operator precedence"""
+        if not isinstance(child, BinaryOp):
+            return False
+
+        # Precedence levels (lower number = lower precedence)
+        precedence = {
+            "or": 1,
+            "||": 1,
+            "and": 2,
+            "&&": 2,
+            "==": 3,
+            "!=": 3,
+            "<": 3,
+            ">": 3,
+            "<=": 3,
+            ">=": 3,
+            "+": 4,
+            "-": 4,
+            "*": 5,
+            "/": 5,
+            "%": 5,
+        }
+
+        child_op = self._convert_operator(child.op)
+        parent_op = self._convert_operator(parent.op)
+
+        child_prec = precedence.get(child_op, 10)
+        parent_prec = precedence.get(parent_op, 10)
+
+        # Need parens if child has lower precedence than parent
+        if child_prec < parent_prec:
+            return True
+
+        # For same precedence, need parens on right side of non-associative ops
+        if child_prec == parent_prec and not is_left and parent_op in ["-", "/", "%"]:
+            return True
+
+        return False
+
+    def visit_unary_op(self, node):
+        """Handle unary operators like not, -"""
+        operand_code = node.operand.accept(self)
+
+        # Only add parentheses if operand is a binary operation
+        if isinstance(node.operand, BinaryOp):
+            operand_code = f"({operand_code})"
+
+        if node.op == "not":
+            return f"!{operand_code}"
+        elif node.op == "-":
+            return f"-{operand_code}"
+        else:
+            return f"{node.op}{operand_code}"
+
+    def _is_string_concat_chain(self, node):
+        """Check if this expression is a + chain involving strings"""
+        if isinstance(node, BinaryOp) and node.op == "+":
+            left_str = getattr(node.left, "inferred_type", None) == "str" or (
+                isinstance(node.left, Literal) and isinstance(node.left.value, str)
+            )
+            right_str = getattr(node.right, "inferred_type", None) == "str" or (
+                isinstance(node.right, Literal) and isinstance(node.right.value, str)
+            )
+            return (
+                left_str
+                or right_str
+                or self._is_string_concat_chain(node.left)
+                or self._is_string_concat_chain(node.right)
+            )
+        return False
+
+    def _collect_string_concat_parts(self, node):
+        parts = []
+        if isinstance(node, BinaryOp) and node.op == "+":
+            parts.extend(self._collect_string_concat_parts(node.left))
+            parts.extend(self._collect_string_concat_parts(node.right))
+        else:
+            if isinstance(node, Literal) and isinstance(node.value, str):
+                parts.append(f'"{node.value}"')
+            else:
+                parts.append(node.accept(self))
+        return [p for p in parts if p.strip()]
+
+    # --- Literal ---
+    def visit_literal(self, node: Literal):
+        if isinstance(node.value, str):
+            return f'"{node.value}"'
+        elif isinstance(node.value, bool):
+            return "true" if node.value else "false"
+        elif isinstance(node.value, float):
+            return repr(node.value) + ("" if "." in repr(node.value) else ".0")
+        else:
+            return str(node.value)
+
+    # --- Variable ---
+    def visit_variable(self, node: Variable):
+        if node.name not in self._variables:
+            # Undeclared — assume int (or could raise error)
+            self._variables[node.name] = "long long"
+        return node.name
+
+    # --- Operator conversion ---
+    def _convert_operator(self, op):
+        return {
+            "and": "&&",
+            "or": "||",
+            "not": "!",
+            "==": "==",
+            "!=": "!=",
+            "<": "<",
+            ">": ">",
+            "<=": "<=",
+            ">=": ">=",
+            "+": "+",
+            "-": "-",
+            "*": "*",
+            "/": "/",
+            "%": "%",
+        }.get(op, op)
+
+    # --- ExprStatement (expression used as a statement) ---
+    def visit_expr_statement(self, node: ExprStatement):
+        code = node.expr.accept(self)
+        if code and code.strip():
+            # If it's a function call that returns a value, we need to handle it
+            if isinstance(node.expr, Call):
+                # For function calls that return values but are used as statements
+                # We need to either capture the result or just call the function
+                if code and not code.endswith(";"):
+                    self.add_line(code + ";")
+                else:
+                    self.add_line(code)
+            else:
+                # For other expressions, add semicolon
+                self.add_line(code + ";")
+
+    def visit_array_declaration(self, node: ArrayDeclaration):
+        # For simplicity: use std::vector
+        elem_type = "long long"  # can be enhanced later
+        init_list = (
+            "{" + ", ".join(["0"] * node.dimensions[0]) + "}"
+            if node.dimensions
+            else "{}"
+        )
+        if len(node.dimensions) > 1:
+            # Nested vectors
+            self.add_line(
+                f"std::vector<std::vector<{elem_type}>> {node.name}({node.dimensions[0]}, std::vector<{elem_type}>({node.dimensions[1]}, 0));"
+            )
+        else:
+            self.add_line(f"std::vector<{elem_type}> {node.name}{init_list};")
+        self._variables[node.name] = f"std::vector<{elem_type}>"
+
+    def visit_array_get(self, node: ArrayGet):
+        index_code = "".join(f"[{idx.accept(self)}]" for idx in node.indices)
+        return f"{node.name}{index_code}"
+
+    def visit_array_set(self, node: ArraySet):
+        index_code = "".join(f"[{idx.accept(self)}]" for idx in node.indices)
+        value = node.value.accept(self)
+        self.add_line(f"{node.name}{index_code} = {value};")
+
+    def visit_list_literal(self, node):
+        """Handle list literals like [1, 2, 3]"""
+        element_codes = [elem.accept(self) for elem in node.elements]
+        return "{" + ", ".join(element_codes) + "}"
+
+    def visit_augmented_assignment(self, node: AugmentedAssignment):
+        expr_code = node.value.accept(self)
+        var_name = node.target
+
+        # Check if variable exists to avoid declaring it with +=
+        if var_name not in self._variables:
+            # Fallback: if it's the first time seeing it,
+            # we must treat it as a declaration + assignment
+            # though Python usually throws NameError for 'x += 1' if x is undefined
+            cpp_type = self._get_cpp_type(node.value)
+            self._variables[var_name] = cpp_type
+            # We transform 'x += 5' to 'int x = 5' if undeclared to prevent C++ crash
+            self.add_line(f"{cpp_type} {var_name} = {expr_code};")
+        else:
+            self.add_line(f"{var_name} {node.op} {expr_code};")
+
+    def visit_comment(self, node: Comment):
+        """Translate Python # to C++ //"""
+        self.add_line(f"// {node.text}")
+</file>
+
+<file path="/home/mik3/Desktop/translator-app/backend/trans/lexer.py">
+import ply.lex as lex
+from typing import Optional
+
+
+class LexicalError(Exception):
+    def __init__(self, message: str, lineno: Optional[int] = None):
+        self.message = message
+        self.lineno = lineno
+        super().__init__(message)
+
+
+class PythonLexer:
+    def __init__(self):
+        self.lexer = None
+        self.indent_stack = [0]
+        self.at_line_start = True
+        self.paren_depth = 0
+
+    tokens = (
+        "PRINT",
+        "IF",
+        "ELSE",
+        "ELIF",
+        "WHILE",
+        "FOR",
+        "IN",
+        "DEF",
+        "RETURN",
+        "IMPORT",
+        "FROM",
+        "AS",
+        "TRUE",
+        "FALSE",
+        "NONE",
+        "AND",
+        "OR",
+        "NOT",
+        "BREAK",
+        "CONTINUE",
+        "PASS",
+        "IS",
+        "IDENTIFIER",
+        "INTEGER_LITERAL",
+        "FLOAT_LITERAL",
+        "STRING_LITERAL",
+        "PLUS",
+        "MINUS",
+        "TIMES",
+        "DIVIDE",
+        "FLOOR_DIVIDE",
+        "MODULO",
+        "POWER",
+        "ASSIGN",
+        "PLUS_ASSIGN",
+        "MINUS_ASSIGN",
+        "TIMES_ASSIGN",
+        "DIVIDE_ASSIGN",
+        "EQ",
+        "NE",
+        "LT",
+        "LE",
+        "GT",
+        "GE",
+        "LPAREN",
+        "RPAREN",
+        "LBRACKET",
+        "RBRACKET",
+        "LBRACE",
+        "RBRACE",
+        "COMMA",
+        "COLON",
+        "DOT",
+        "SEMICOLON",
+        "INDENT",
+        "DEDENT",
+        "NEWLINE",
+        "COMMENT",
+    )
+
+    # Простые токены
+    t_PLUS = r"\+"
+    t_MINUS = r"-"
+    t_TIMES = r"\*"
+    t_DIVIDE = r"/"
+    t_FLOOR_DIVIDE = r"//"
+    t_MODULO = r"%"
+    t_POWER = r"\*\*"
+
+    t_ASSIGN = r"="
+    t_PLUS_ASSIGN = r"\+="
+    t_MINUS_ASSIGN = r"-="
+    t_TIMES_ASSIGN = r"\*="
+    t_DIVIDE_ASSIGN = r"/="
+
+    t_EQ = r"=="
+    t_NE = r"!="
+    t_LT = r"<"
+    t_LE = r"<="
+    t_GT = r">"
+    t_GE = r">="
+
+    t_LPAREN = r"\("
+    t_RPAREN = r"\)"
+    t_LBRACKET = r"\["
+    t_RBRACKET = r"\]"
+    t_LBRACE = r"\{"
+    t_RBRACE = r"\}"
+    t_COMMA = r","
+    t_COLON = r":"
+    t_DOT = r"\."
+    t_SEMICOLON = r";"
+
+    t_ignore = " \t"
+
+    def t_PRINT(self, t):
+        r"print"
+        return t
+
+    def t_COMMENT(self, t):
+        r"\#.*"
+        t.value = t.value[1:].strip()
+        return t
+
+    def t_IDENTIFIER(self, t):
+        r"[a-zA-Z_][a-zA-Z_0-9]*"
+        keywords = {
+            "if": "IF",
+            "else": "ELSE",
+            "elif": "ELIF",
+            "while": "WHILE",
+            "for": "FOR",
+            "in": "IN",
+            "def": "DEF",
+            "return": "RETURN",
+            "import": "IMPORT",
+            "from": "FROM",
+            "as": "AS",
+            "True": "TRUE",
+            "False": "FALSE",
+            "None": "NONE",
+            "and": "AND",
+            "or": "OR",
+            "not": "NOT",
+            "break": "BREAK",
+            "continue": "CONTINUE",
+            "pass": "PASS",
+            "is": "IS",
+        }
+        t.type = keywords.get(t.value, "IDENTIFIER")
+        return t
+
+    def t_FLOAT_LITERAL(self, t):
+        r"\d+\.\d*([eE][-+]?\d+)?|\.\d+([eE][-+]?\d+)?"
+        t.value = float(t.value)
+        return t
+
+    def t_INTEGER_LITERAL(self, t):
+        r"\d+"
+        t.value = int(t.value)
+        return t
+
+    def t_STRING_LITERAL(self, t):
+        r"\"([^\\\n]|(\\.))*?\"|\'([^\\\n]|(\\.))*?\'"
+        t.value = t.value[1:-1]
+        return t
+
+    def t_NEWLINE(self, t):
+        r"\n+"
+        t.lexer.lineno += len(t.value)
+        self.at_line_start = True
+        return t
+
+    def t_indent(self, t):
+        r"[ \t]+"
+        if self.at_line_start and self.paren_depth == 0:
+            indent = len(t.value)
+            last_indent = self.indent_stack[-1]
+
+            if indent > last_indent:
+                t.type = "INDENT"
+                self.indent_stack.append(indent)
+                return t
+            elif indent < last_indent:
+                tokens = []
+                while indent < self.indent_stack[-1]:
+                    self.indent_stack.pop()
+                    dedent_token = lex.LexToken()
+                    dedent_token.type = "DEDENT"
+                    dedent_token.value = ""
+                    dedent_token.lineno = t.lineno
+                    dedent_token.lexpos = t.lexpos
+                    tokens.append(dedent_token)
+
+                if indent != self.indent_stack[-1]:
+                    raise SyntaxError(
+                        f"Несогласованный отступ (ожидалось {self.indent_stack[-1]}, получено {indent})"
+                    )
+
+                if tokens:
+                    t.lexer.token_stack.extend(tokens[1:])
+                    return tokens[0]
+        # Не возвращаем токен для отступов в середине строки
+
+    def t_error(self, t):
+        raise LexicalError(
+            message=f"Недопустимый символ '{t.value[0]}'", lineno=t.lineno
+        )
+
+    def build(self, **kwargs):
+        self.lexer = lex.lex(module=self, **kwargs)
+        self.lexer.token_stack = []
+
+    def token(self):
+        if hasattr(self.lexer, "token_stack") and self.lexer.token_stack:
+            return self.lexer.token_stack.pop(0)
+        tok = self.lexer.token()
+        while tok and tok.type in ("NEWLINE",):
+            if tok.type == "NEWLINE":
+                self.at_line_start = True
+            yield tok
+            tok = self.lexer.token()
+        if tok:
+            self.at_line_start = False
+            yield tok
+
+    def tokenize(self, data):
+        self.lexer.input(data)
+        tokens = []
+        for tok in self.token():
+            tokens.append(tok)
+        return tokens
+</file>
+
+<file path="/home/mik3/Desktop/translator-app/backend/trans/semantic_analyzer.py">
+from typing import Dict, Set, List, Optional, Any
+from .ast_nodes import Node
+
+
+class SemanticError(Exception):
+    def __init__(self, errors: List[str]):
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
+class Symbol:
+    """Класс для представления символа (переменной или функции)"""
+
+    def __init__(self, name: str, symbol_type: str, lineno: int = 0):
+        self.name = name  # Имя символа
+        self.type = symbol_type  # Тип: 'variable', 'function', 'parameter'
+        self.lineno = lineno  # Номер строки объявления
+        self.initialized = False  # Инициализирована ли переменная
+        self.used = False  # Использовалась ли переменная
+
+    def __repr__(self):
+        return f"Symbol({self.name}, {self.type}, line={self.lineno})"
+
+
+class Scope:
+    """Класс для представления области видимости"""
+
+    def __init__(self, parent: Optional["Scope"] = None, name: str = ""):
+        self.parent = parent  # Родительская область видимости
+        self.name = name  # Имя области (для отладки)
+        self.symbols: Dict[str, Symbol] = {}  # Символы в этой области
+
+    def define(self, symbol: Symbol) -> bool:
+        """Добавляет символ в область видимости"""
+        if symbol.name in self.symbols:
+            return False  # Символ уже определен
+        self.symbols[symbol.name] = symbol
+        return True
+
+    def lookup(self, name: str) -> Optional[Symbol]:
+        """Ищет символ в текущей и родительских областях"""
+        if name in self.symbols:
+            return self.symbols[name]
+        elif self.parent:
+            return self.parent.lookup(name)
+        return None
+
+    def get_local(self, name: str) -> Optional[Symbol]:
+        """Ищет символ только в текущей области"""
+        return self.symbols.get(name)
+
+
+class SemanticAnalyzer:
+    """Семантический анализатор для проверки корректности программы"""
+
+    def __init__(self):
+        self.current_scope: Optional[Scope] = None
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
+        self._function_return_types = {}  # Типы возвращаемых значений функций
+
+    def analyze(self, ast) -> bool:
+        """Основной метод семантического анализа"""
+        self.errors.clear()
+        self.warnings.clear()
+
+        # Создаем глобальную область видимости
+        global_scope = Scope(name="global")
+        self.current_scope = global_scope
+
+        # Добавляем встроенные функции Python
+        self._add_builtin_functions(global_scope)
+
+        # Обходим AST
+        self._visit_node(ast)
+
+        if self.errors:
+            raise SemanticError(self.errors)
+
+        return True
+
+    def _add_builtin_functions(self, scope: Scope):
+        """Добавляет встроенные функции Python в область видимости"""
+        builtins = [
+            Symbol("print", "function"),
+            Symbol("len", "function"),
+            Symbol("range", "function"),
+            Symbol("input", "function"),
+            Symbol("int", "function"),
+            Symbol("str", "function"),
+            Symbol("float", "function"),
+            Symbol("bool", "function"),
+        ]
+
+        for builtin in builtins:
+            scope.define(builtin)
+
+    def _error(self, message: str, lineno: int = 0):
+        """Добавляет ошибку"""
+        if lineno:
+            self.errors.append(f"Ошибка [строка {lineno}]: {message}")
+        else:
+            self.errors.append(f"Ошибка: {message}")
+
+    def _warning(self, message: str, lineno: int = 0):
+        """Добавляет предупреждение"""
+        if lineno:
+            self.warnings.append(f"Предупреждение [строка {lineno}]: {message}")
+        else:
+            self.warnings.append(f"Предупреждение: {message}")
+
+    def _enter_scope(self, name: str = "") -> Scope:
+        """Входит в новую область видимости"""
+        new_scope = Scope(parent=self.current_scope, name=name)
+        self.current_scope = new_scope
+        return new_scope
+
+    def _exit_scope(self):
+        """Выходит из текущей области видимости"""
+        if self.current_scope and self.current_scope.parent:
+            # Проверяем неиспользованные переменные
+            for symbol in self.current_scope.symbols.values():
+                if symbol.type == "variable" and not symbol.used:
+                    self._warning(
+                        f"Переменная '{symbol.name}' объявлена, но не используется",
+                        symbol.lineno,
+                    )
+
+            self.current_scope = self.current_scope.parent
+
+    def _visit_node(self, node):
+        """Рекурсивно обходит узел AST"""
+        if node is None:
+            return
+
+        class_name = node.__class__.__name__
+
+        if class_name == "Program":
+            self._visit_program(node)
+        elif class_name == "Function":
+            self._visit_function(node)
+        elif class_name == "Assignment":
+            self._visit_assignment(node)
+        elif class_name == "Variable":
+            self._visit_variable(node)
+        elif class_name == "Call":
+            self._visit_call(node)
+        elif class_name == "BinaryOp":
+            self._visit_binary_op(node)
+        elif class_name == "Literal":
+            self._visit_literal(node)
+        elif class_name == "If":
+            self._visit_if(node)
+        elif class_name == "While":
+            self._visit_while(node)
+        elif class_name == "For":
+            self._visit_for(node)
+        elif class_name == "ArrayGet":
+            self._visit_array_get(node)
+        elif class_name == "ArraySet":
+            self._visit_array_set(node)
+        elif class_name == "ArrayDeclaration":
+            self._visit_array_declaration(node)
+        elif class_name == "UnaryOp":
+            self._visit_unary_op(node)
+        elif class_name == "Return":
+            self._visit_return(node)
+        elif class_name == "ExprStatement":
+            self._visit_expr_statement(node)
+        elif class_name == "Comment":
+            self._visit_comment(node)
+        else:
+            # Для неизвестных типов узлов рекурсивно обходим дочерние элементы
+            self._visit_children(node)
+
+    def _visit_children(self, node):
+        """Рекурсивно обходит все дочерние элементы узла"""
+        if hasattr(node, "body"):
+            for child in node.body:
+                self._visit_node(child)
+        if hasattr(node, "orelse"):
+            for child in node.orelse:
+                self._visit_node(child)
+        if hasattr(node, "value"):
+            self._visit_node(node.value)
+        if hasattr(node, "test"):
+            self._visit_node(node.test)
+        if hasattr(node, "left"):
+            self._visit_node(node.left)
+        if hasattr(node, "right"):
+            self._visit_node(node.right)
+        if hasattr(node, "func"):
+            self._visit_node(node.func)
+        if hasattr(node, "args"):
+            for arg in node.args:
+                self._visit_node(arg)
+        if hasattr(node, "iter"):
+            self._visit_node(node.iter)
+
+    # Методы обхода конкретных типов узлов
+
+    def _visit_program(self, node):
+        """Обработка программы (глобальная область видимости)"""
+        for stmt in node.body:
+            self._visit_node(stmt)
+
+    def _visit_comment(self, node):
+        """Comments don't affect semantics, just skip"""
+        pass
+
+    def _visit_function(self, node):
+        """Обработка объявления функции"""
+
+        # Проверяем, не переопределяет ли функция встроенное имя
+        existing = self.current_scope.lookup(node.name)
+        if existing and existing.type == "function":
+            self._warning(f"Переопределение встроенной функции '{node.name}'")
+
+        # Определяем функцию в текущей области
+        func_symbol = Symbol(node.name, "function")
+        self.current_scope.define(func_symbol)
+
+        # Входим в область видимости функции
+        self._enter_scope(f"function_{node.name}")
+
+        # Добавляем параметры в область видимости и проверяем дубликаты
+        seen_params = set()
+        for param in node.params:
+            if param in seen_params:
+                self._error(f"Дублирующийся параметр '{param}' в функции '{node.name}'")
+            seen_params.add(param)
+
+            param_symbol = Symbol(param, "parameter")
+            param_symbol.initialized = True  # Parameters are always initialized
+            if not self.current_scope.define(param_symbol):
+                self._error(f"Повторное объявление параметра '{param}'")
+
+        # Обрабатываем тело функции
+        has_return = False
+        for stmt in node.body:
+            self._visit_node(stmt)
+            if stmt.__class__.__name__ == "Return":
+                has_return = True
+
+        # Проверяем наличие return в не-void функции
+        if not has_return and node.name != "main":
+            self._warning(f"Функция '{node.name}' не возвращает значение")
+
+        # Выходим из области видимости функции
+        self._exit_scope()
+
+    def _visit_assignment(self, node):
+        """Обработка присваивания"""
+
+        # Обрабатываем правую часть (значение)
+        self._visit_node(node.value)
+
+        # Проверяем, определена ли переменная
+        existing = self.current_scope.lookup(node.target)
+
+        if existing:
+            # Переменная уже существует - помечаем как использованную и инициализированную
+            existing.used = True
+            existing.initialized = True
+        else:
+            # Новая переменная - определяем в текущей области
+            var_symbol = Symbol(node.target, "variable")
+            var_symbol.initialized = True
+            var_symbol.used = True
+            if not self.current_scope.define(var_symbol):
+                self._error(f"Не удалось определить переменную '{node.target}'")
+
+    def _visit_variable(self, node):
+        """Обработка использования переменной"""
+        symbol = self.current_scope.lookup(node.name)
+
+        if not symbol:
+            self._error(f"Неопределенная переменная '{node.name}'")
+        elif symbol.type == "variable" and not symbol.initialized:
+            self._warning(
+                f"Использование неинициализированной переменной '{node.name}'"
+            )
+        else:
+            # Помечаем переменную как использованную
+            symbol.used = True
+
+    def _visit_call(self, node):
+        """Обработка вызова функции"""
+        # Проверяем функцию
+        if node.func.__class__.__name__ == "Variable":
+            func_symbol = self.current_scope.lookup(node.func.name)
+            if not func_symbol:
+                self._error(f"Вызов неопределенной функции '{node.func.name}'")
+            elif func_symbol.type != "function":
+                self._error(f"'{node.func.name}' не является функцией")
+
+        # Проверяем аргументы
+        for arg in node.args:
+            self._visit_node(arg)
+
+    def _visit_binary_op(self, node):
+        """Обработка бинарной операции"""
+        self._visit_node(node.left)
+        self._visit_node(node.right)
+
+    def _visit_literal(self, node):
+        if isinstance(node.value, bool):
+            node.inferred_type = "bool"
+        elif isinstance(node.value, int):
+            node.inferred_type = "int"
+        elif isinstance(node.value, float):
+            node.inferred_type = "float"
+        elif isinstance(node.value, str):
+            node.inferred_type = "str"
+
+    def _visit_if(self, node):
+        """Обработка условного оператора"""
+        # Проверяем условие
+        self._visit_node(node.test)
+
+        # Обрабатываем тело if
+        for stmt in node.body:
+            self._visit_node(stmt)
+
+        # Обрабатываем elif
+        for elif_node in node.elifs:
+            self._visit_node(elif_node.test)
+            for stmt in elif_node.body:
+                self._visit_node(stmt)
+
+        # Обрабатываем тело else (если есть)
+        for stmt in node.orelse:
+            self._visit_node(stmt)
+
+    def _visit_while(self, node):
+        """Обработка цикла while"""
+        self._visit_node(node.test)
+
+        for stmt in node.body:
+            self._visit_node(stmt)
+
+    def _visit_for(self, node):
+        """Обработка цикла for"""
+        # В вашей структуре node.start и node.stop - это строки или числа,
+        # а не обязательно узлы AST, требующие обхода.
+        # Если они являются узлами (Expression), их нужно посетить:
+        if hasattr(node, "start") and isinstance(node.start, Node):
+            self._visit_node(node.start)
+        if hasattr(node, "stop") and isinstance(node.stop, Node):
+            self._visit_node(node.stop)
+
+        # Входим в область видимости цикла
+        self._enter_scope(f"for_loop_{node.target}")
+
+        # Определяем переменную цикла
+        loop_var = Symbol(node.target, "variable")
+        loop_var.initialized = True
+        self.current_scope.define(loop_var)
+
+        # Обрабатываем тело цикла
+        for stmt in node.body:
+            self._visit_node(stmt)
+
+        # Выходим из области видимости цикла
+        self._exit_scope()
+
+    def _visit_return(self, node):
+        """Обработка оператора return"""
+        if node.value:
+            self._visit_node(node.value)
+
+    def _visit_array_get(self, node):
+        symbol = self.current_scope.lookup(node.name)
+        if not symbol:
+            self._error(f"Использование неопределённого массива '{node.name}'")
+        else:
+            symbol.used = True
+        for i in node.indices:
+            self._visit_node(i)
+
+    def _visit_array_set(self, node):
+        symbol = self.current_scope.lookup(node.name)
+        if not symbol:
+            symbol = Symbol(node.name, "variable")
+            symbol.initialized = True
+            self.current_scope.define(symbol)
+        for i in node.indices:
+            self._visit_node(i)
+        self._visit_node(node.value)
+
+    def _visit_array_declaration(self, node):
+        if not self.current_scope.define(Symbol(node.name, "variable")):
+            self._error(f"Повторное объявление массива '{node.name}'")
+
+    def _visit_unary_op(self, node):
+        """Обработка унарной операции"""
+        self._visit_node(node.operand)
+
+    def _visit_expr_statement(self, node):
+        """Обработка выражения как оператора"""
+        self._visit_node(node.expr)
+</file>
+
+<file path="/home/mik3/Desktop/translator-app/backend/trans/simple_parser.py">
+from trans.lexer import PythonLexer
+from trans.ast_nodes import *
+from trans.ast_nodes import ArrayGet, ArraySet, ArrayDeclaration
+
+
+class IndentBlockParser:
+    def __init__(self):
+        self.lexer = PythonLexer()
+        self.lexer.build()
+        self.tokens = self.lexer.tokens
+        self.lines = []
+        self.current_line = 0
+
+    def parse(self, code: str):
+        lines = code.split("\n")
+        for line_no, line in enumerate(lines, 1):
+            line_stripped = line.strip()
+            if not line_stripped or line_stripped.startswith("#"):
+                continue
+
+            # Check for unbalanced parentheses and brackets
+            paren_count = 0
+            bracket_count = 0
+            brace_count = 0
+            in_string = False
+            string_char = None
+
+            for i, char in enumerate(line_stripped):
+                if char in ('"', "'") and (i == 0 or line_stripped[i - 1] != "\\"):
+                    if not in_string:
+                        in_string = True
+                        string_char = char
+                    elif char == string_char:
+                        in_string = False
+                        string_char = None
+                elif not in_string:
+                    if char == "(":
+                        paren_count += 1
+                    elif char == ")":
+                        paren_count -= 1
+                    elif char == "[":
+                        bracket_count += 1
+                    elif char == "]":
+                        bracket_count -= 1
+                    elif char == "{":
+                        brace_count += 1
+                    elif char == "}":
+                        brace_count -= 1
+
+            if in_string:
+                raise SyntaxError(f"Строка {line_no}: Незакрытая строка")
+            if paren_count > 0:
+                raise SyntaxError(f"Строка {line_no}: Незакрытая круглая скобка '('")
+            if paren_count < 0:
+                raise SyntaxError(f"Строка {line_no}: Лишняя закрывающая скобка ')'")
+            if bracket_count > 0:
+                raise SyntaxError(f"Строка {line_no}: Незакрытая квадратная скобка '['")
+            if bracket_count < 0:
+                raise SyntaxError(f"Строка {line_no}: Лишняя закрывающая скобка ']'")
+            if brace_count != 0:
+                raise SyntaxError(
+                    f"Строка {line_no}: Несбалансированные фигурные скобки"
+                )
+
+            # Try to tokenize this line
+            test_lexer = PythonLexer()
+            test_lexer.build()
+            test_lexer.lexer.input(line_stripped)
+
+            try:
+                # Force tokenization of entire line
+                token_count = 0
+                for tok in test_lexer.token():
+                    token_count += 1
+                    if token_count > 1000:  # Prevent infinite loops
+                        break
+            except SyntaxError as e:
+                # Add line number to error
+                raise SyntaxError(f"Строка {line_no}: {str(e)}")
+
+        # Now proceed with parsing as before
+        self.lines = [line.rstrip() for line in lines if line.strip()]
+        self.current_line = 0
+
+        print("Упрощенный код для парсинга:")
+        print("\n".join(self.lines))
+        print("---")
+
+        program = Program()
+        while self.current_line < len(self.lines):
+            stmt = self.parse_stmt(0)
+            if stmt:
+                program.body.append(stmt)
+
+        print(f"SUCCESS: Программа с {len(program.body)} операторов")
+        return program
+
+    def get_indent(self, line):
+        return len(line) - len(line.lstrip(" "))
+
+    def split_args(self, args_str):
+        """Split arguments by comma, but respect quotes"""
+        args = []
+        current = []
+        in_quote = False
+        quote_char = None
+        paren_depth = 0
+        bracket_depth = 0
+
+        for char in args_str:
+            if char in ('"', "'") and (not in_quote or char == quote_char):
+                in_quote = not in_quote
+                if in_quote:
+                    quote_char = char
+                else:
+                    quote_char = None
+                current.append(char)
+            elif char == "(" and not in_quote:
+                paren_depth += 1
+                current.append(char)
+            elif char == ")" and not in_quote:
+                paren_depth -= 1
+                current.append(char)
+            elif char == "[" and not in_quote:
+                bracket_depth += 1
+                current.append(char)
+            elif char == "]" and not in_quote:
+                bracket_depth -= 1
+                current.append(char)
+            elif (
+                char == "," and not in_quote and paren_depth == 0 and bracket_depth == 0
+            ):
+                args.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+
+        if current:
+            args.append("".join(current).strip())
+
+        return [arg for arg in args if arg]
+
+    def parse_stmt(self, base_indent):
+        if self.current_line >= len(self.lines):
+            return None
+
+        line = self.lines[self.current_line]
+        indent = self.get_indent(line)
+        if indent < base_indent:
+            return None
+
+        stripped = line.strip()
+
+        aug_ops = ["+=", "-=", "*=", "/="]
+        for op in aug_ops:
+            if op in stripped:
+                # Check that we aren't splitting a comparison like '=='
+                # and that the op isn't inside a string (simplified)
+                parts = stripped.split(op, 1)
+                target = parts[0].strip()
+                value_str = parts[1].strip()
+
+                # Basic check: target shouldn't contain spaces (usually a variable or array access)
+                if " " not in target or "]" in target:
+                    self.current_line += 1
+                    return AugmentedAssignment(target, op, self.parse_expr(value_str))
+
+        self.current_line += 1
+
+        if stripped.startswith("#"):
+            self.current_line += 1
+            return Comment(stripped[1:].strip())
+
+        if "#" in stripped:
+            code_part, comment_part = stripped.split("#", 1)
+            stripped = code_part.strip()
+
+        if stripped.startswith("def "):
+            if not stripped.endswith(":"):
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Ожидалось ':' после определения функции"
+                )
+            name_params = stripped[4:-1].split("(")  # Remove trailing ':'
+            name = name_params[0].strip()
+            if len(name_params) < 2:
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Некорректное определение функции"
+                )
+            params_str = name_params[1].split(")")[0]
+            params = self.split_args(params_str)
+            body = self.parse_block(indent + 4)
+            return Function(name, params, body)
+
+        if stripped.startswith("if "):
+            if not stripped.endswith(":"):
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Ожидалось ':' после условия if"
+                )
+            condition = stripped[3:-1].strip()  # Remove 'if ' and trailing ':'
+            body = self.parse_block(indent + 4)
+            elifs = []
+            orelse = []
+
+            while self.current_line < len(self.lines):
+                nl = self.lines[self.current_line]
+                ni = self.get_indent(nl)
+                ns = nl.strip()
+
+                if ni != indent:
+                    break
+
+                if ns.startswith("elif "):
+                    if not ns.endswith(":"):
+                        raise SyntaxError(
+                            f"Строка {self.current_line}: Ожидалось ':' после условия elif"
+                        )
+                    self.current_line += 1
+                    cond = ns[5:-1].strip()  # Remove 'elif ' and trailing ':'
+                    elif_body = self.parse_block(indent + 4)
+                    elifs.append(If(self.parse_expr(cond), elif_body))
+
+                elif ns.startswith("else:"):
+                    self.current_line += 1
+                    orelse = self.parse_block(indent + 4)
+
+                else:
+                    break
+
+            return If(self.parse_expr(condition), body, elifs, orelse)
+
+        if stripped.startswith("while "):
+            if not stripped.endswith(":"):
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Ожидалось ':' после условия while"
+                )
+            condition = stripped[6:-1].strip()  # Remove 'while ' and trailing ':'
+            body = self.parse_block(indent + 4)
+            return While(self.parse_expr(condition), body)
+
+        elif stripped.startswith("for "):
+            if not stripped.endswith(":"):
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Ожидалось ':' после цикла for"
+                )
+
+            # Remove 'for ' and trailing ':'
+            content = stripped[4:-1]
+            if " in " not in content:
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Ожидалось 'in' в цикле for"
+                )
+
+            parts = content.split(" in ", 1)
+            target = parts[0].strip()
+            iterator_part = parts[1].strip()
+
+            start_val = "0"
+            stop_val = "0"
+
+            is_range = True
+
+            if iterator_part.startswith("range("):
+                # Extract arguments from range(...)
+                args_str = iterator_part[6:-1]
+                args = self.split_args(args_str)
+
+                if len(args) == 1:
+                    start_val = "0"
+                    stop_val = args[0]
+                elif len(args) >= 2:
+                    start_val = args[0]
+                    stop_val = args[1]
+                # Note: You could add support for step (args[2]) here if needed
+            else:
+                # Fallback for non-range iterators if necessary
+                is_range = False
+                stop_val = iterator_part
+
+            body = self.parse_block(indent + 4)
+            return For(target, start_val, stop_val, body, is_range)
+
+        if stripped.startswith("return"):
+            expr = stripped[6:].strip()
+            return Return(self.parse_expr(expr) if expr else None)
+
+        if "=" in stripped and "[" in stripped.split("=")[0]:
+            left, right = stripped.split("=", 1)
+            name, rest = left.strip().split("[", 1)
+
+            indices = []
+            cur = rest
+            while True:
+                inside, after = cur.split("]", 1)
+                indices.append(self.parse_expr(inside))
+                if after.startswith("["):
+                    cur = after[1:]
+                    continue
+                break
+
+            return ArraySet(name.strip(), indices, self.parse_expr(right.strip()))
+
+        if (
+            "=" in stripped
+            and not stripped.startswith("==")
+            and not stripped.startswith("!=")
+        ):
+            var, expr = stripped.split("=", 1)
+            var = var.strip()
+            expr = expr.strip()
+
+            # Check for list literal: a = [1, 2, 3]
+            if expr.startswith("[") and expr.endswith("]"):
+                # Parse list literal
+                list_content = expr[1:-1].strip()
+                if list_content:
+                    elements = [
+                        self.parse_expr(e) for e in self.split_args(list_content)
+                    ]
+                    # Create a special assignment with list literal
+                    # We'll use Assignment but mark the value as a list
+                    from trans.ast_nodes import ListLiteral
+
+                    return Assignment(var, ListLiteral(elements))
+                else:
+                    # Empty list
+                    return ArrayDeclaration(var, [0])
+
+            if "[" in expr and "]" in expr and "*" in expr and "for" not in expr:
+                try:
+                    left_part, right_part = expr.split("*", 1)
+                    if left_part.strip().startswith("[") and left_part.strip().endswith(
+                        "]"
+                    ):
+                        if right_part.strip().isdigit():
+                            return ArrayDeclaration(var, [int(right_part)])
+                except:
+                    pass
+
+            if "for" in expr and "range(" in expr:
+                try:
+                    inner, tail = expr.split("for", 1)
+                    if "*" in inner:
+                        _, r = inner.split("*", 1)
+                        M = int(r.strip())
+                    else:
+                        raise ValueError()
+                    inside = tail.split("range(", 1)[1]
+                    N = inside.split(")")[0]
+                    N = int(N)
+                    return ArrayDeclaration(var, [N, M])
+                except:
+                    pass
+
+            return Assignment(var, self.parse_expr(expr))
+
+        if "(" in stripped and stripped.endswith(")"):
+            name_part = stripped.split("(", 1)[0].strip()
+            args_str = stripped.split("(", 1)[1][:-1].strip()
+            args = [self.parse_expr(a) for a in self.split_args(args_str)]
+            return ExprStatement(Call(Variable(name_part), args))
+
+        # Check for unclosed function calls
+        if "(" in stripped and not stripped.endswith(")"):
+            # Check if this looks like a function call (identifier followed by '(')
+            before_paren = stripped.split("(")[0].strip()
+            if before_paren and before_paren.replace("_", "").isalnum():
+                raise SyntaxError(
+                    f"Строка {self.current_line}: Незакрытая скобка в вызове функции"
+                )
+
+        try:
+            expr = self.parse_expr(stripped)
+            if expr is not None:
+                return ExprStatement(expr)
+            else:
+                raise SyntaxError(f"Неизвестный или пустой оператор: {stripped}")
+        except Exception as e:
+            raise SyntaxError(f"Не удалось распознать оператор: {stripped}") from e
+
+    def parse_block(self, base_indent):
+        block = []
+        start_line = self.current_line
+        while self.current_line < len(self.lines):
+            stmt = self.parse_stmt(base_indent)
+            if stmt is None:
+                break
+            block.append(stmt)
+        if not block and self.current_line > start_line:
+            raise SyntaxError(
+                "Ожидался блок с отступом после объявления (def/if/while и т.д.)"
+            )
+        return block
+
+    def parse_expr(self, expr: str):
+        """Parse expression with proper operator precedence"""
+        expr = expr.strip()
+
+        # Handle string literals first
+        if (expr.startswith('"') and expr.endswith('"')) or (
+            expr.startswith("'") and expr.endswith("'")
+        ):
+            return Literal(expr[1:-1])
+
+        if expr == "True":
+            return Literal(True)
+        if expr == "False":
+            return Literal(False)
+
+        # Number detection
+        if (
+            expr.replace(".", "", 1).replace("e-", "", 1).replace("e+", "", 1).isdigit()
+            or expr.lstrip("-")
+            .replace(".", "", 1)
+            .replace("e-", "", 1)
+            .replace("e+", "", 1)
+            .isdigit()
+        ):
+            if "." in expr or "e" in expr.lower():
+                return Literal(float(expr))
+            else:
+                return Literal(int(expr))
+
+        # Precedence levels (lowest to highest):
+        # 1. or
+        # 2. and
+        # 3. not (unary)
+        # 4. comparison (==, !=, <, >, <=, >=)
+        # 5. addition/subtraction (+, -)
+        # 6. multiplication/division (*, /, %)
+        # 7. unary minus (-)
+        # 8. parentheses, function calls, array access
+
+        # Level 1: or (lowest precedence)
+        parts = self.split_on_operator(expr, " or ")
+        if len(parts) == 2:
+            return BinaryOp(self.parse_expr(parts[0]), "or", self.parse_expr(parts[1]))
+
+        # Level 2: and
+        parts = self.split_on_operator(expr, " and ")
+        if len(parts) == 2:
+            return BinaryOp(self.parse_expr(parts[0]), "and", self.parse_expr(parts[1]))
+
+        # Level 3: not (unary) - only at the START of expression
+        if expr.startswith("not "):
+            operand = expr[4:].strip()
+            # Parse the operand with higher precedence (don't allow and/or to bind tighter)
+            return UnaryOp("not", self.parse_comparison_or_higher(operand))
+
+        # Comparison and arithmetic operators
+        return self.parse_comparison_or_higher(expr)
+
+    def parse_comparison_or_higher(self, expr):
+        """Parse comparison operators and higher precedence"""
+        expr = expr.strip()
+
+        # Level 4: Comparison operators
+        for op in ["<=", ">=", "==", "!=", "<", ">"]:
+            parts = self.split_on_operator(expr, op)
+            if len(parts) == 2:
+                return BinaryOp(
+                    self.parse_arithmetic(parts[0]), op, self.parse_arithmetic(parts[1])
+                )
+
+        # No comparison, continue to arithmetic
+        return self.parse_arithmetic(expr)
+
+    def parse_arithmetic(self, expr):
+        """Parse arithmetic operators"""
+        expr = expr.strip()
+
+        # Level 5: Addition and subtraction
+        # Try + first
+        parts = self.split_on_operator(expr, "+")
+        if len(parts) == 2:
+            return BinaryOp(self.parse_term(parts[0]), "+", self.parse_term(parts[1]))
+
+        # Try -
+        parts = self.split_on_operator(expr, "-")
+        if len(parts) == 2:
+            return BinaryOp(self.parse_term(parts[0]), "-", self.parse_term(parts[1]))
+
+        # No addition/subtraction, continue to multiplication
+        return self.parse_term(expr)
+
+    def parse_term(self, expr):
+        """Parse multiplication, division, modulo"""
+        expr = expr.strip()
+
+        # Level 6: Multiplication, division, modulo
+        for op in ["*", "/", "%"]:
+            parts = self.split_on_operator(expr, op)
+            if len(parts) == 2:
+                return BinaryOp(
+                    self.parse_factor(parts[0]), op, self.parse_factor(parts[1])
+                )
+
+        return self.parse_factor(expr)
+
+    def parse_factor(self, expr):
+        """Parse unary operators and primary expressions"""
+        expr = expr.strip()
+
+        # Unary minus
+        if expr.startswith("-") and len(expr) > 1:
+            return UnaryOp("-", self.parse_primary(expr[1:].strip()))
+
+        return self.parse_primary(expr)
+
+    def parse_primary(self, expr):
+        """Parse primary expressions: literals, variables, function calls, array access"""
+        expr = expr.strip()
+
+        # String literals
+        if (expr.startswith('"') and expr.endswith('"')) or (
+            expr.startswith("'") and expr.endswith("'")
+        ):
+            return Literal(expr[1:-1])
+
+        # Booleans
+        if expr == "True":
+            return Literal(True)
+        if expr == "False":
+            return Literal(False)
+
+        # Numbers
+        if (
+            expr.replace(".", "", 1).replace("e-", "", 1).replace("e+", "", 1).isdigit()
+            or expr.lstrip("-")
+            .replace(".", "", 1)
+            .replace("e-", "", 1)
+            .replace("e+", "", 1)
+            .isdigit()
+        ):
+            if "." in expr or "e" in expr.lower():
+                return Literal(float(expr))
+            else:
+                return Literal(int(expr))
+
+        # Function calls
+        if "(" in expr and expr.endswith(")"):
+            name = expr.split("(", 1)[0].strip()
+            args_str = expr[len(name) + 1 : -1].strip()
+            args = [self.parse_expr(a) for a in self.split_args(args_str)]
+            return Call(Variable(name), args)
+
+        # Array access
+        if "[" in expr and expr.endswith("]"):
+            name, rest = expr.split("[", 1)
+            indices = []
+            cur = rest
+            while True:
+                inside, after = cur.split("]", 1)
+                indices.append(self.parse_expr(inside))
+                if after.startswith("["):
+                    cur = after[1:]
+                    continue
+                break
+            return ArrayGet(name.strip(), indices)
+
+        # Variable
+        return Variable(expr)
+
+    def split_on_operator(self, expr, op):
+        """Split expression on operator, but respect quotes and parentheses"""
+        parts = []
+        current = []
+        in_quote = False
+        quote_char = None
+        paren_depth = 0
+        i = 0
+
+        while i < len(expr):
+            char = expr[i]
+
+            if char in ('"', "'") and (not in_quote or char == quote_char):
+                in_quote = not in_quote
+                if in_quote:
+                    quote_char = char
+                else:
+                    quote_char = None
+                current.append(char)
+                i += 1
+            elif char == "(" and not in_quote:
+                paren_depth += 1
+                current.append(char)
+                i += 1
+            elif char == ")" and not in_quote:
+                paren_depth -= 1
+                current.append(char)
+                i += 1
+            elif not in_quote and paren_depth == 0 and expr[i : i + len(op)] == op:
+                parts.append("".join(current).strip())
+                current = []
+                i += len(op)
+                if len(parts) == 1:
+                    # Found the operator, collect the rest
+                    parts.append(expr[i:].strip())
+                    break
+            else:
+                current.append(char)
+                i += 1
+
+        if len(parts) == 0 and current:
+            parts.append("".join(current).strip())
+
+        return parts
+
+    def _current_line_number(self):
+        return self.current_line + 1
+</file>
 
 </files>

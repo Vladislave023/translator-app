@@ -9,15 +9,15 @@ export async function translate(code) {
     body: JSON.stringify({ code }),
   });
 
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const err = await res.json();
-      msg = err.detail ? err.detail : msg;
-    } catch (_) {}
-    throw new Error(msg);
+  const data = await res.json();
+
+  if (!res.ok || !data.success) {
+    // Извлекаем ошибки из структурированного ответа
+    const errors = data.errors || [
+      { type: "general", message: data.detail || "Unknown error" },
+    ];
+    throw { errors }; // Кидаем объект с errors
   }
 
-  const data = await res.json();
-  return data.cpp; // сервер возвращает { cpp: "..." }
+  return data.cpp;
 }

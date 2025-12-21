@@ -8,12 +8,16 @@ class Node(ABC):
         pass
 
 
-class Statement(Node):
-    pass
-
-
 class Expression(Node):
-    pass
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inferred_type: Optional[str] = None  # "int", "float", "str", "bool"
+
+
+class Statement(Node):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inferred_type: Optional[str] = None
 
 
 class Program(Node):
@@ -45,7 +49,16 @@ class BinaryOp(Expression):
 
 class Literal(Expression):
     def __init__(self, value: Any):
+        super().__init__()
         self.value = value
+        if isinstance(value, bool):
+            self.inferred_type = "bool"
+        elif isinstance(value, int):
+            self.inferred_type = "int"
+        elif isinstance(value, float):
+            self.inferred_type = "float"
+        elif isinstance(value, str):
+            self.inferred_type = "str"
 
     def accept(self, visitor) -> Any:
         return visitor.visit_literal(self)
@@ -66,6 +79,26 @@ class Call(Expression):
 
     def accept(self, visitor) -> Any:
         return visitor.visit_call(self)
+
+
+class Comment(Statement):
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_comment(self)
+
+
+class AugmentedAssignment(Statement):
+    def __init__(self, target: str, op: str, value: Expression):
+        super().__init__()
+        self.target = target
+        self.op = op
+        self.value = value
+
+    def accept(self, visitor) -> Any:
+        return visitor.visit_augmented_assignment(self)
 
 
 class If(Statement):
@@ -113,10 +146,15 @@ class While(Statement):
 
 
 class For(Statement):
-    def __init__(self, target: str, iter: Expression, body: List[Statement]):
+    def __init__(
+        self, target: str, start: str, stop: str, body: List[Statement], is_range: bool
+    ):
+        super().__init__()
         self.target = target
-        self.iter = iter
+        self.start = start
+        self.stop = stop
         self.body = body
+        self.is_range = is_range
 
     def accept(self, visitor) -> Any:
         return visitor.visit_for(self)
@@ -128,6 +166,16 @@ class ExprStatement(Statement):
 
     def accept(self, visitor):
         return visitor.visit_expr_statement(self)
+
+
+class UnaryOp(Expression):
+    def __init__(self, op: str, operand: Expression):
+        super().__init__()
+        self.op = op
+        self.operand = operand
+
+    def accept(self, visitor):
+        return visitor.visit_unary_op(self)
 
 
 class ASTVisitor(ABC):
@@ -149,6 +197,10 @@ class ASTVisitor(ABC):
 
     @abstractmethod
     def visit_literal(self, node: Literal) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_unary_op(self, node: UnaryOp) -> Any:
         pass
 
     @abstractmethod
@@ -178,13 +230,26 @@ class ASTVisitor(ABC):
     @abstractmethod
     def visit_for(self, node: For) -> Any:
         pass
-# --- Добавить в ast_nodes.py (в конец файла) ---
+
+    @abstractmethod
+    def visit_list_literal(self, node: "ListLiteral") -> Any:
+        pass
+
+    @abstractmethod
+    def visit_augmented_assignment(self, node: AugmentedAssignment) -> Any:
+        pass
+
+    @abstractmethod
+    def visit_comment(self, node: Comment) -> Any:
+        pass
+
 
 class ArrayType:
     """
     Представление типа массива в семантике: базовый тип + список размеров.
     dimensions может быть список int (для литералов) или None/выражения, если размер выражён.
     """
+
     def __init__(self, base_type, dimensions):
         # base_type: строка или другой объект типа
         # dimensions: list[int] или list[ExpressionNode] (или пустой список для неизвестных)
@@ -199,11 +264,12 @@ class ArrayDeclarationNode(Node):
     """
     Узел объявления массива: int a[10]; float b[3][4];
     """
+
     def __init__(self, var_type, name, dimensions, lineno=None):
         # var_type: строка или TypeNode
         # name: идентификатор
         # dimensions: list[int] или list[ExpressionNode]
-        super().__init__(lineno=lineno) if hasattr(Node, '__init__') else None
+        super().__init__(lineno=lineno) if hasattr(Node, "__init__") else None
         self.var_type = var_type
         self.name = name
         self.dimensions = dimensions or []
@@ -216,15 +282,18 @@ class ArrayAccessNode(Node):
     """
     Узел обращения к элементу массива: a[expr] или b[i][j]
     """
+
     def __init__(self, name, indices, lineno=None):
         # name: идентификатор
         # indices: list[ExpressionNode]
-        super().__init__(lineno=lineno) if hasattr(Node, '__init__') else None
+        super().__init__(lineno=lineno) if hasattr(Node, "__init__") else None
         self.name = name
         self.indices = indices or []
 
     def __repr__(self):
         return f"ArrayAccessNode({self.name}, {self.indices})"
+
+
 class ArrayGet(Expression):
     def __init__(self, name: str, indices: List[Expression]):
         self.name = name
@@ -236,6 +305,7 @@ class ArrayGet(Expression):
 
 class ArraySet(Statement):
     """a[i] = value"""
+
     def __init__(self, name: str, indices: List[Expression], value: Expression):
         self.name = name
         self.indices = indices
@@ -247,9 +317,21 @@ class ArraySet(Statement):
 
 class ArrayDeclaration(Statement):
     """a = [0] * 10 or a = [[0]*4 for _ in range(3)]"""
+
     def __init__(self, name: str, dimensions: List[int]):
         self.name = name
         self.dimensions = dimensions
 
     def accept(self, visitor):
         return visitor.visit_array_declaration(self)
+
+
+class ListLiteral(Expression):
+    """Represents a list literal like [1, 2, 3]"""
+
+    def __init__(self, elements: List[Expression]):
+        super().__init__()
+        self.elements = elements
+
+    def accept(self, visitor):
+        return visitor.visit_list_literal(self)
