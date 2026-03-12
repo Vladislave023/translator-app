@@ -3,28 +3,25 @@ a[0] = 10
 a[4] = a[0] + 7
 print(a[4])
 
-
-a = [0] * 3
+ab = [0] * 3
 i = 1
-a[i] = 42
-print(a[i])
+ab[i] = 42
+print(ab[i])
 
-b = [[0] * 4 for _ in range(3)]
-b[2][1] = 55
-print(b[2][1])
+bc = [[0] * 4 for _ in range(3)]
+bc[2][1] = 55
+print(bc[2][1])
 
-
-b = [[0] * 4 for _ in range(3)]
+bf = [[0] * 4 for _ in range(3)]
 i = 1
 j = 2
-b[i][j] = 99
-print(b[i][j])
+bf[i][j] = 99
+print(bf[i][j])
 
-a = [0] * 4
+arr = [0] * 4
 i = 0
 while i < 4:
-    a[i] = i + 10
+    arr[i] = i + 10
     i = i + 1
 
-print(a[2])
-
+print(arr[2])
